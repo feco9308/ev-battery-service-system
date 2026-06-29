@@ -1,28 +1,17 @@
 # Panel alapú hardver dokumentáció
 
-A hardver dokumentációt panel funkció szerint bontjuk szét. Így minden panelhez külön helyen lehet tárolni:
+A hardver dokumentációt panel funkció szerint bontjuk szét. Jelenleg csak a ténylegesen használt panelmappák szerepelnek itt.
 
-- kapcsolási rajz PDF-et,
-- PCB nézeteket PNG/JPG formában,
-- gyártási fájlokat,
-- BOM-ot,
-- pinoutot,
-- kommunikációs leírást,
-- ellenőrzési jegyzeteket.
-
-## Javasolt panel mappák
+## Aktív panelmappák
 
 ```text
-main-controller/          Fő vezérlő panel
-cell-measure-isospi/      Cella feszültségmérő / isoSPI panel
 cell-balancer-module/     Cellánkénti balanszer STM32 modul
-relay-load-switch/        Relé / terheléskapcsoló rész
-power-supply-interface/   RS232 tápegység interfész
+cell-measure-isospi/      Cella feszültségmérő / isoSPI panel
 current-sense/            Shunt / árammérő rész
-connectors-harness/       Csatlakozók, kábelezés, harness
+main-controller/          Fő vezérlő panel
 ```
 
-## Fájlelnevezési javaslat
+## Fájlelnevezési javaslat panelenként
 
 ```text
 schematic.pdf
