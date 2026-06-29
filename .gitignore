@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+.env.*
+*.sqlite
+*.db
+
+# Build outputs
+build/
+dist/
+out/
+Debug/
+Release/
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.a
+
+# STM32 / IDE
+*.ioc.bak
+.metadata/
+.settings/
+.project
+.cproject
+.mxproject
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
