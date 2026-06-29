@@ -79,7 +79,7 @@ Byte7: reserved
 Sima CAN esetén darabolni kell.
 
 ```text
-CAN ID: 0x110 + packet_index
+CAN ID: 0x110
 Byte0: packet_index
 Byte1: first_cell_index
 Byte2-3: cell_1_mV

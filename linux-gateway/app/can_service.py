@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from typing import Callable, Awaitable
 
@@ -9,29 +10,46 @@ from .models import GatewayStatus
 
 
 StatusCallback = Callable[[GatewayStatus], Awaitable[None]]
+logger = logging.getLogger(__name__)
 
 
 class CanService:
-    def __init__(self, channel: str = "vcan0", bustype: str = "socketcan") -> None:
+    def __init__(self, channel: str = "vcan0", bustype: str = "socketcan", rx_timeout_s: float = 2.0) -> None:
         self.channel = channel
         self.bustype = bustype
+        self.rx_timeout_s = rx_timeout_s
         self.bus: can.BusABC | None = None
         self.status = GatewayStatus()
         self._running = False
         self._sequence = 0
         self._callbacks: list[StatusCallback] = []
+        self._tasks: list[asyncio.Task] = []
 
     def add_status_callback(self, callback: StatusCallback) -> None:
         self._callbacks.append(callback)
 
     async def start(self) -> None:
-        self.bus = can.Bus(interface=self.bustype, channel=self.channel)
+        try:
+            self.bus = can.Bus(interface=self.bustype, channel=self.channel)
+            self.status.can_error = None
+        except (can.CanError, OSError) as exc:
+            self.status.can_error = f"CAN bus start failed on {self.channel}: {exc}"
+            logger.warning(self.status.can_error)
+            self.bus = None
         self._running = True
-        asyncio.create_task(self._rx_loop())
-        asyncio.create_task(self._heartbeat_loop())
+        self._tasks = [
+            asyncio.create_task(self._rx_loop()),
+            asyncio.create_task(self._heartbeat_loop()),
+            asyncio.create_task(self._timeout_loop()),
+        ]
 
     async def stop(self) -> None:
         self._running = False
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks = []
         if self.bus is not None:
             self.bus.shutdown()
             self.bus = None
@@ -71,9 +89,42 @@ class CanService:
     def _apply_decoded_frame(self, name: str, payload: dict) -> None:
         self.status.connected = True
         self.status.last_can_rx_ms = int(time.time() * 1000)
+        if name == "cell_voltages":
+            self._apply_cell_voltages(payload)
+            return
+        if name == "fault":
+            self.status.fault_code = payload["fault_code"]
+            self.status.fault_detail = payload["fault_detail"]
+            self.status.fault_source = payload["source"]
+            self.status.fault_severity = payload["severity"]
+            return
         for key, value in payload.items():
             if hasattr(self.status, key):
                 setattr(self.status, key, value)
+
+    def _apply_cell_voltages(self, payload: dict) -> None:
+        first_cell_index = int(payload["first_cell_index"])
+        values = list(payload["cell_voltages_mv"])
+        required_len = first_cell_index + len(values)
+        if len(self.status.cell_voltages_mv) < required_len:
+            self.status.cell_voltages_mv.extend([None] * (required_len - len(self.status.cell_voltages_mv)))
+        for offset, value in enumerate(values):
+            self.status.cell_voltages_mv[first_cell_index + offset] = value
+        valid_values = [value for value in self.status.cell_voltages_mv if value is not None and value > 0]
+        if valid_values:
+            self.status.min_cell_mv = min(valid_values)
+            self.status.max_cell_mv = max(valid_values)
+            self.status.cell_delta_mv = self.status.max_cell_mv - self.status.min_cell_mv
+
+    async def _timeout_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(0.25)
+            if self.status.last_can_rx_ms is None:
+                continue
+            age_s = (int(time.time() * 1000) - self.status.last_can_rx_ms) / 1000
+            if self.status.connected and age_s > self.rx_timeout_s:
+                self.status.connected = False
+                await self._notify_status()
 
     async def _notify_status(self) -> None:
         for callback in self._callbacks:

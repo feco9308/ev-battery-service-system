@@ -39,11 +39,23 @@ Böngészőből:
 http://localhost:8000
 ```
 
+Ha a `vcan0` még nincs létrehozva, az app akkor is elindul, de a `/api/status`
+válaszban a `can_error` mező jelzi a CAN kapcsolódási hibát. Parancs küldése
+ilyenkor `503` választ ad.
+
 ## 4. CAN szimulátor indítása másik terminálban
 
 ```bash
 source linux-gateway/.venv/bin/activate
-python tools/can-simulator/send_status.py --channel vcan0
+python tools/can-simulator/send_status.py --channel vcan0 --cells 120
+```
+
+A `--cells` paraméterrel állítható, hány cellát szimuláljon. Példák:
+
+```bash
+python tools/can-simulator/send_status.py --channel vcan0 --cells 18
+python tools/can-simulator/send_status.py --channel vcan0 --cells 54
+python tools/can-simulator/send_status.py --channel vcan0 --cells 120
 ```
 
 ## 5. API teszt

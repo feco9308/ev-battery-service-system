@@ -15,6 +15,7 @@ class SystemState(IntEnum):
 
 class GatewayStatus(BaseModel):
     connected: bool = False
+    can_error: str | None = None
     system_state: int = int(SystemState.BOOT)
     fault_state: int = 0
     relay_flags: int = 0
@@ -25,6 +26,14 @@ class GatewayStatus(BaseModel):
     pack_voltage_v: float | None = None
     current_a: float | None = None
     power_w: float | None = None
+    cell_voltages_mv: list[int | None] = Field(default_factory=list)
+    min_cell_mv: int | None = None
+    max_cell_mv: int | None = None
+    cell_delta_mv: int | None = None
+    fault_code: int | None = None
+    fault_detail: int | None = None
+    fault_source: int | None = None
+    fault_severity: int | None = None
     measurement_valid: bool = False
     last_can_rx_ms: int | None = None
 

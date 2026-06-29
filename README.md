@@ -1,5 +1,7 @@
 # EV Battery Service System
 
+Aktuális fejlesztői verzió: `0.2.0`
+
 Elektromos autó akkumulátor mérő, töltő, terhelő és balanszoló rendszer többpaneles STM32 hardverrel, Linux gateway géppel és webes kezelőfelülettel.
 
 ## Cél

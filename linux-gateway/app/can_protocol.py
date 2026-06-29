@@ -4,6 +4,7 @@ from enum import IntEnum
 
 class CanId(IntEnum):
     SYSTEM_STATUS = 0x100
+    CELL_VOLTAGES = 0x110
     PACK_MEASUREMENT = 0x120
     FAULT = 0x180
     COMMAND = 0x200
@@ -32,6 +33,8 @@ class DecodedFrame:
 def decode_frame(arbitration_id: int, data: bytes) -> DecodedFrame | None:
     if arbitration_id == CanId.SYSTEM_STATUS:
         return _decode_system_status(data)
+    if arbitration_id == CanId.CELL_VOLTAGES:
+        return _decode_cell_voltages(arbitration_id, data)
     if arbitration_id == CanId.PACK_MEASUREMENT:
         return _decode_pack_measurement(data)
     if arbitration_id == CanId.FAULT:
@@ -72,6 +75,26 @@ def _decode_pack_measurement(data: bytes) -> DecodedFrame:
             "current_a": current_raw / 100.0,
             "power_w": float(power_raw),
             "measurement_valid": bool(padded[6]),
+        },
+    )
+
+
+def _decode_cell_voltages(arbitration_id: int, data: bytes) -> DecodedFrame:
+    padded = data.ljust(8, b"\x00")
+    packet_index = padded[0]
+    first_cell_index = padded[1]
+    cell_voltages_mv = [
+        padded[2] | (padded[3] << 8),
+        padded[4] | (padded[5] << 8),
+        padded[6] | (padded[7] << 8),
+    ]
+    return DecodedFrame(
+        arbitration_id=arbitration_id,
+        name="cell_voltages",
+        payload={
+            "packet_index": packet_index,
+            "first_cell_index": first_cell_index,
+            "cell_voltages_mv": cell_voltages_mv,
         },
     )
 
