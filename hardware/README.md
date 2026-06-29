@@ -1,18 +1,15 @@
 # Hardware dokumentáció
 
-A hardver dokumentációt panel funkció szerint bontjuk szét. Ez azért jó, mert minden panelhez külön lehet kezelni a kapcsolási rajzot, PCB képeket, BOM-ot, pinoutot és ellenőrzési jegyzeteket.
+A hardver dokumentációt panel funkció szerint bontjuk szét. Jelenleg csak a ténylegesen használt négy panel szerepel a struktúrában.
 
 ## Panel alapú struktúra
 
 ```text
 hardware/panels/
-  main-controller/          Fő vezérlő panel
-  cell-measure-isospi/      Cella feszültségmérő / isoSPI panel
   cell-balancer-module/     Cellánkénti balanszer STM32 modul
-  relay-load-switch/        Relé / terheléskapcsoló rész
-  power-supply-interface/   RS232 tápegység interfész
+  cell-measure-isospi/      Cella feszültségmérő / isoSPI panel
   current-sense/            Shunt / árammérő rész
-  connectors-harness/       Csatlakozók és kábelezés
+  main-controller/          Fő vezérlő panel
 ```
 
 ## Fájlfeltöltési javaslat panelenként
@@ -29,18 +26,16 @@ pinout.md                  Csatlakozó kiosztás
 review-checklist.md        Ellenőrzési jegyzetek
 ```
 
-## Ellenőrzési szempontok
+## Általános ellenőrzési szempontok
 
-- Relé alapállapota resetnél.
-- Flyback diódák / TVS védelem.
+- Reset vagy hiba esetén a kimenetek biztonságos alapállapotba kerüljenek.
 - isoSPI transzformátor, lezárás és polaritás.
 - CAN lezárás és transceiver bekötés.
 - UART busz topológia.
-- RS232 valódi szintillesztés vagy TTL UART.
 - I2C pullup feszültségszint.
 - Shunt árammérő Kelvin bekötés.
 - Tápágak sorrendje és izoláció.
-- Emergency stop lehetőség.
+- Emergency stop lehetőség, ha van ilyen a hardveren.
 
 ## Megjegyzés
 
