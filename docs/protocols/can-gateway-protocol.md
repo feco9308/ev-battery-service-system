@@ -29,6 +29,7 @@ A Linux gateway magas szintű parancsokat küld és állapotot jelenít meg. A f
 0x150  Balancer summary status
 0x160  Temperature packet base
 0x180  Fault frame
+0x190  Cell internal resistance packet base
 
 0x200  Command base
 0x210  Measurement command
@@ -129,6 +130,27 @@ Byte7: uptime_s high
 3 CRITICAL
 ```
 
+## 0x190 + packet_index - Cell internal resistance packet
+
+Irány: fő vezérlő -> Linux gateway
+
+Sima CAN esetén egy frame 3 cella becsült belső ellenállását tartalmazza.
+
+```text
+CAN ID: 0x190 + packet_index
+Byte0: packet_index
+Byte1: first_cell_index
+Byte2-3: cell_0_centi_mOhm, unsigned, 0.01 mOhm / bit
+Byte4-5: cell_1_centi_mOhm, unsigned, 0.01 mOhm / bit
+Byte6-7: cell_2_centi_mOhm, unsigned, 0.01 mOhm / bit
+```
+
+Példa:
+
+```text
+cell_0_centi_mOhm = 200 -> 2.00 mOhm
+```
+
 ## 0x260 - Gateway heartbeat
 
 Irány: Linux gateway -> fő vezérlő
@@ -171,6 +193,27 @@ Byte7: reserved
 0x30 SUPPLY_OUTPUT_OFF
 0x40 BALANCER_ALL_OFF
 0xF0 EMERGENCY_STOP
+```
+
+### MEASUREMENT_START parameter_u32
+
+Gyors teszt / belső ellenállás mérés indítása:
+
+```text
+Byte0: measurement_type
+Byte1: load_level
+Byte2-3: reserved
+```
+
+```text
+measurement_type:
+1 QUICK_TEST_INTERNAL_RESISTANCE
+
+load_level:
+1 LOW
+2 MEDIUM
+3 HIGH
+4 MAX
 ```
 
 ## 0x270 - Command acknowledge

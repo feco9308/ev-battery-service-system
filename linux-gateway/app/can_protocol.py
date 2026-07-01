@@ -4,11 +4,13 @@ from enum import IntEnum
 
 class CanId(IntEnum):
     SYSTEM_STATUS = 0x100
-    CELL_VOLTAGES = 0x110
+    CELL_VOLTAGE_BASE = 0x110
     PACK_MEASUREMENT = 0x120
     FAULT = 0x180
+    CELL_RESISTANCE_BASE = 0x190
     COMMAND = 0x200
     HEARTBEAT = 0x260
+    COMMAND_ACK = 0x270
 
 
 class CommandId(IntEnum):
@@ -23,6 +25,26 @@ class CommandId(IntEnum):
     EMERGENCY_STOP = 0xF0
 
 
+class CommandResult(IntEnum):
+    OK = 0
+    REJECTED = 1
+    BUSY = 2
+    INVALID_STATE = 3
+    INVALID_PARAMETER = 4
+    FAULT_ACTIVE = 5
+
+
+class MeasurementType(IntEnum):
+    QUICK_TEST_INTERNAL_RESISTANCE = 1
+
+
+class LoadLevel(IntEnum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    MAX = 4
+
+
 @dataclass
 class DecodedFrame:
     arbitration_id: int
@@ -33,12 +55,16 @@ class DecodedFrame:
 def decode_frame(arbitration_id: int, data: bytes) -> DecodedFrame | None:
     if arbitration_id == CanId.SYSTEM_STATUS:
         return _decode_system_status(data)
-    if arbitration_id == CanId.CELL_VOLTAGES:
-        return _decode_cell_voltages(arbitration_id, data)
     if arbitration_id == CanId.PACK_MEASUREMENT:
         return _decode_pack_measurement(data)
+    if int(CanId.CELL_VOLTAGE_BASE) <= arbitration_id < int(CanId.PACK_MEASUREMENT):
+        return _decode_cell_voltages(arbitration_id, data)
     if arbitration_id == CanId.FAULT:
         return _decode_fault(data)
+    if int(CanId.CELL_RESISTANCE_BASE) <= arbitration_id < int(CanId.COMMAND):
+        return _decode_cell_resistances(arbitration_id, data)
+    if arbitration_id == CanId.COMMAND_ACK:
+        return _decode_command_ack(data)
     return None
 
 
@@ -101,6 +127,7 @@ def _decode_cell_voltages(arbitration_id: int, data: bytes) -> DecodedFrame:
 
 def _decode_fault(data: bytes) -> DecodedFrame:
     padded = data.ljust(8, b"\x00")
+    uptime_s = padded[6] | (padded[7] << 8)
     return DecodedFrame(
         arbitration_id=CanId.FAULT,
         name="fault",
@@ -109,6 +136,42 @@ def _decode_fault(data: bytes) -> DecodedFrame:
             "fault_detail": padded[1],
             "source": padded[2],
             "severity": padded[3],
+            "related_index": padded[4],
+            "uptime_s": uptime_s,
+        },
+    )
+
+
+def _decode_cell_resistances(arbitration_id: int, data: bytes) -> DecodedFrame:
+    padded = data.ljust(8, b"\x00")
+    packet_index = padded[0]
+    first_cell_index = padded[1]
+    cell_resistances_mohm = [
+        (padded[2] | (padded[3] << 8)) / 100.0,
+        (padded[4] | (padded[5] << 8)) / 100.0,
+        (padded[6] | (padded[7] << 8)) / 100.0,
+    ]
+    return DecodedFrame(
+        arbitration_id=arbitration_id,
+        name="cell_resistances",
+        payload={
+            "packet_index": packet_index,
+            "first_cell_index": first_cell_index,
+            "cell_resistances_mohm": cell_resistances_mohm,
+        },
+    )
+
+
+def _decode_command_ack(data: bytes) -> DecodedFrame:
+    padded = data.ljust(8, b"\x00")
+    return DecodedFrame(
+        arbitration_id=CanId.COMMAND_ACK,
+        name="command_ack",
+        payload={
+            "command_id": padded[0],
+            "command_seq": padded[1],
+            "result_code": padded[2],
+            "reject_reason": padded[3],
         },
     )
 
@@ -135,3 +198,23 @@ def encode_command(command_id: CommandId, sequence: int, parameter: int = 0, fla
         0,
     ])
     return int(CanId.COMMAND), data
+
+
+def encode_measurement_start_parameter(measurement_type: MeasurementType | int, load_level: LoadLevel | int = 0) -> int:
+    return (int(measurement_type) & 0xFF) | ((int(load_level) & 0xFF) << 8)
+
+
+def encode_command_ack(
+    command_id: CommandId | int,
+    command_seq: int,
+    result_code: CommandResult | int = CommandResult.OK,
+    reject_reason: int = 0,
+) -> tuple[int, bytes]:
+    data = bytes([
+        int(command_id) & 0xFF,
+        command_seq & 0xFF,
+        int(result_code) & 0xFF,
+        reject_reason & 0xFF,
+        0, 0, 0, 0,
+    ])
+    return int(CanId.COMMAND_ACK), data

@@ -92,11 +92,22 @@ class CanService:
         if name == "cell_voltages":
             self._apply_cell_voltages(payload)
             return
+        if name == "cell_resistances":
+            self._apply_cell_resistances(payload)
+            return
         if name == "fault":
             self.status.fault_code = payload["fault_code"]
             self.status.fault_detail = payload["fault_detail"]
             self.status.fault_source = payload["source"]
             self.status.fault_severity = payload["severity"]
+            self.status.fault_related_index = payload["related_index"]
+            self.status.uptime_s = payload["uptime_s"]
+            return
+        if name == "command_ack":
+            self.status.last_command_id = payload["command_id"]
+            self.status.last_command_seq = payload["command_seq"]
+            self.status.last_command_result = payload["result_code"]
+            self.status.last_command_reject_reason = payload["reject_reason"]
             return
         for key, value in payload.items():
             if hasattr(self.status, key):
@@ -115,6 +126,20 @@ class CanService:
             self.status.min_cell_mv = min(valid_values)
             self.status.max_cell_mv = max(valid_values)
             self.status.cell_delta_mv = self.status.max_cell_mv - self.status.min_cell_mv
+
+    def _apply_cell_resistances(self, payload: dict) -> None:
+        if not self.status.resistance_measurement_running:
+            return
+        first_cell_index = int(payload["first_cell_index"])
+        values = list(payload["cell_resistances_mohm"])
+        required_len = first_cell_index + len(values)
+        if len(self.status.cell_resistances_mohm) < required_len:
+            self.status.cell_resistances_mohm.extend([None] * (required_len - len(self.status.cell_resistances_mohm)))
+        for offset, value in enumerate(values):
+            self.status.cell_resistances_mohm[first_cell_index + offset] = value
+        valid_values = [value for value in self.status.cell_resistances_mohm if value is not None and value > 0]
+        if valid_values:
+            self.status.max_cell_resistance_mohm = max(valid_values)
 
     async def _timeout_loop(self) -> None:
         while self._running:

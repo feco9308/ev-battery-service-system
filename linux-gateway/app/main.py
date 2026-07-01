@@ -1,13 +1,35 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse
+import os
+import secrets
 
-from .can_protocol import CommandId
+from fastapi import Depends, FastAPI, Header, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse, Response
+
+from .can_protocol import CommandId, LoadLevel, MeasurementType, encode_measurement_start_parameter
 from .can_service import CanService
 from .models import CommandRequest, GatewayStatus
+from .reporting import ReportStore, build_report_from_status, export_report_csv
+from .reporting.models import MeasurementReport, ReportCreateRequest
 
 app = FastAPI(title="EV Battery Service Gateway")
 can_service = CanService(channel="vcan0")
+report_store = ReportStore()
 websockets: set[WebSocket] = set()
+
+
+def verify_report_api_token(authorization: str | None = None, x_api_key: str | None = None) -> None:
+    expected_token = os.getenv("GATEWAY_API_TOKEN")
+    if not expected_token:
+        return
+    bearer_prefix = "Bearer "
+    supplied_token = x_api_key or ""
+    if authorization and authorization.startswith(bearer_prefix):
+        supplied_token = authorization[len(bearer_prefix):]
+    if not secrets.compare_digest(supplied_token, expected_token):
+        raise HTTPException(status_code=401, detail="Invalid or missing report API token")
+
+
+def require_report_api_token(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)) -> None:
+    verify_report_api_token(authorization=authorization, x_api_key=x_api_key)
 
 
 @app.on_event("startup")
@@ -26,12 +48,59 @@ async def get_status() -> GatewayStatus:
     return can_service.status
 
 
+@app.get("/api/reports", response_model=list[MeasurementReport], dependencies=[Depends(require_report_api_token)])
+async def list_reports() -> list[MeasurementReport]:
+    return report_store.list()
+
+
+@app.post("/api/reports", response_model=MeasurementReport, dependencies=[Depends(require_report_api_token)])
+async def create_report(request: ReportCreateRequest) -> MeasurementReport:
+    report = build_report_from_status(can_service.status, request)
+    return report_store.add(report)
+
+
+@app.get("/api/reports/{measurement_id}", response_model=MeasurementReport, dependencies=[Depends(require_report_api_token)])
+async def get_report(measurement_id: str) -> MeasurementReport:
+    report = report_store.get(measurement_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@app.get("/api/reports/{measurement_id}/json", response_model=MeasurementReport, dependencies=[Depends(require_report_api_token)])
+async def export_report_json(measurement_id: str) -> MeasurementReport:
+    return await get_report(measurement_id)
+
+
+@app.get("/api/reports/{measurement_id}/csv", dependencies=[Depends(require_report_api_token)])
+async def export_report_csv_endpoint(measurement_id: str) -> Response:
+    report = await get_report(measurement_id)
+    return Response(
+        content=export_report_csv(report),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{measurement_id}.csv"'},
+    )
+
+
+@app.get("/api/reports/{measurement_id}/pdf", dependencies=[Depends(require_report_api_token)])
+async def export_report_pdf(measurement_id: str) -> None:
+    await get_report(measurement_id)
+    raise HTTPException(status_code=501, detail="PDF export is planned but not implemented yet")
+
+
+@app.get("/api/reports/{measurement_id}/docx", dependencies=[Depends(require_report_api_token)])
+async def export_report_docx(measurement_id: str) -> None:
+    await get_report(measurement_id)
+    raise HTTPException(status_code=501, detail="DOCX export is planned but not implemented yet")
+
+
 @app.post("/api/command")
 async def send_command(request: CommandRequest) -> dict:
     command_map = {
         "ping": CommandId.PING,
         "clear_fault": CommandId.CLEAR_FAULT,
         "measurement_start": CommandId.MEASUREMENT_START,
+        "internal_resistance_start": CommandId.MEASUREMENT_START,
         "measurement_stop": CommandId.MEASUREMENT_STOP,
         "relay_all_off": CommandId.RELAY_ALL_OFF,
         "supply_output_off": CommandId.SUPPLY_OUTPUT_OFF,
@@ -41,10 +110,21 @@ async def send_command(request: CommandRequest) -> dict:
     command = command_map.get(request.command)
     if command is None:
         raise HTTPException(status_code=400, detail="Unknown command")
+    parameter = request.value or 0
+    if request.command == "internal_resistance_start":
+        try:
+            load_level = LoadLevel(parameter)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid load level") from exc
+        parameter = encode_measurement_start_parameter(MeasurementType.QUICK_TEST_INTERNAL_RESISTANCE, load_level)
     try:
-        await can_service.send_command(command, request.value or 0)
+        await can_service.send_command(command, parameter)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if request.command == "internal_resistance_start":
+        can_service.status.resistance_measurement_running = True
+    elif request.command == "measurement_stop":
+        can_service.status.resistance_measurement_running = False
     return {"ok": True, "command": request.command}
 
 
@@ -518,6 +598,7 @@ async def index() -> str:
     <nav class="tabbar" aria-label="Gateway funkciók">
       <button class="tab-button active" data-tab="overview" onclick="showTab('overview')">Áttekintés</button>
       <button class="tab-button" data-tab="cells" onclick="showTab('cells')">Cella fesz mérés</button>
+      <button class="tab-button" data-tab="resistance" onclick="showTab('resistance')">Ellenállás mérés</button>
       <button class="tab-button" data-tab="discharge" onclick="showTab('discharge')">Kisütés</button>
       <button class="tab-button" data-tab="cell-charge" onclick="showTab('cell-charge')">Cellánkénti töltés</button>
       <button class="tab-button" data-tab="charge" onclick="showTab('charge')">Teljes töltés</button>
@@ -613,12 +694,56 @@ async def index() -> str:
           </div>
           <div class="panel-body">
             <div class="form-grid">
-              <div class="field"><label>Megjelenített cellák</label><input id="cellTargetCount" type="number" min="1" max="255" value="120"></div>
+              <div class="field"><label>Megjelenített cellák</label><input id="cellTargetCount" type="number" min="1" max="48" value="48"></div>
               <div class="field"><label>Alsó figyelmeztetés</label><input id="cellWarnLow" type="number" step="0.001" value="3.000"></div>
               <div class="field"><label>Felső figyelmeztetés</label><input id="cellWarnHigh" type="number" step="0.001" value="4.200"></div>
               <div class="field"><label>Max delta</label><input id="cellMaxDelta" type="number" step="1" value="20"></div>
             </div>
             <div id="cellsMirror" class="cells" style="margin-top: 14px;"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="tab-resistance" class="tab-panel">
+      <div class="grid">
+        <section class="span-5">
+          <div class="panel-head">
+            <h2>Belső ellenállás mérés</h2>
+            <span id="resistanceStatus" class="badge">Készenlét</span>
+          </div>
+          <div class="panel-body">
+            <div class="form-grid">
+              <div class="field">
+                <label>Terhelés</label>
+                <select id="resistanceLoadLevel">
+                  <option value="1">LOW - kis terhelés</option>
+                  <option value="2" selected>MEDIUM - közepes terhelés</option>
+                  <option value="3">HIGH - nagy terhelés</option>
+                  <option value="4">MAX - maximális tesztterhelés</option>
+                </select>
+              </div>
+              <div class="field"><label>Megjelenített cellák</label><input id="resistanceCellCount" type="number" min="1" max="48" value="18"></div>
+            </div>
+            <div class="commands" style="margin-top: 14px;">
+              <button class="primary" onclick="startResistanceMeasurement()">Mérés indítása</button>
+              <button class="stop" onclick="cmd('measurement_stop')">Mérés leállítása</button>
+              <button class="danger" onclick="cmd('emergency_stop', true)">EMERGENCY STOP</button>
+            </div>
+            <div id="resistanceLog" class="log"></div>
+          </div>
+        </section>
+        <section class="span-7">
+          <div class="panel-head">
+            <h2>Cellánkénti ellenállás</h2>
+            <span id="resistanceCount" class="badge">0 cella</span>
+          </div>
+          <div class="panel-body">
+            <div class="kv" style="margin-bottom: 14px;">
+              <div><span>Max ellenállás</span><strong><span id="maxResistance">--</span> mOhm</strong></div>
+              <div><span>Terhelőáram</span><strong><span id="resistanceCurrent">--</span> A</strong></div>
+            </div>
+            <div id="resistanceCells" class="cells"></div>
           </div>
         </section>
       </div>
@@ -751,10 +876,16 @@ async def index() -> str:
               <div class="field"><label>Ügyfél / jármű</label><input id="reportVehicle" value="Teszt jármű"></div>
               <div class="field"><label>Technikus</label><input id="reportTechnician" value="ERP"></div>
               <div class="field"><label>Mérés típusa</label><select id="reportMode"><option>Teljes ciklus</option><option>Cella fesz mérés</option><option>Kisütés</option><option>Töltés</option></select></div>
+              <div class="field"><label>ERP referencia</label><input id="reportErpReference" value=""></div>
+              <div class="field"><label>Számlaszám</label><input id="reportInvoiceNumber" value=""></div>
+              <div class="field"><label>Munkalap azonosító</label><input id="reportWorkOrderId" value=""></div>
             </div>
             <div class="commands" style="margin-top: 14px;">
-              <button class="primary" onclick="buildReport()">Jegyzőkönyv előnézet</button>
-              <button onclick="downloadReport()">TXT letöltés</button>
+              <button class="primary" onclick="createReport()">Jegyzőkönyv mentése / előnézet</button>
+              <button onclick="downloadReportExport('json')">JSON letöltés</button>
+              <button onclick="downloadReportExport('csv')">CSV letöltés</button>
+              <button onclick="downloadReportExport('pdf')">PDF</button>
+              <button onclick="downloadReportExport('docx')">DOCX</button>
             </div>
             <pre id="reportPreview">Nincs generált jegyzőkönyv.</pre>
           </div>
@@ -776,7 +907,7 @@ async def index() -> str:
     };
 
     let latestStatus = null;
-    let latestReport = '';
+    let latestReport = null;
 
     const el = (id) => document.getElementById(id);
     const fmt = (value, digits = 1) => value === null || value === undefined ? '--' : Number(value).toFixed(digits);
@@ -844,6 +975,8 @@ async def index() -> str:
       faultBadge.textContent = faultActive ? 'Fault aktív' : 'Nincs fault';
 
       renderCells(status.cell_voltages_mv ?? []);
+      renderResistances(status.cell_resistances_mohm ?? []);
+      renderResistanceRunState(status);
       renderWorkflowMirrors(status);
     }
 
@@ -894,6 +1027,46 @@ async def index() -> str:
       select.innerHTML = Array.from({length: count || 1}, (_, index) => `<option value="${index}">C${index + 1}</option>`).join('');
     }
 
+    function getResistanceDisplayCount(total) {
+      const input = el('resistanceCellCount');
+      const requested = Number(input?.value ?? total);
+      if (!Number.isFinite(requested) || requested < 1) {
+        return total;
+      }
+      return Math.min(Math.floor(requested), total);
+    }
+
+    function renderResistances(values) {
+      const visible = values.slice(0, getResistanceDisplayCount(values.length));
+      const valid = visible.filter((value) => value !== null && value !== undefined && value > 0);
+      const maxValue = valid.length ? Math.max(...valid) : null;
+      text('resistanceCount', `${visible.length} / ${values.length} cella`);
+      text('maxResistance', maxValue === null ? '--' : maxValue.toFixed(2));
+      text('resistanceCurrent', latestStatus ? fmt(latestStatus.current_a, 2) : '--');
+      el('resistanceCells').innerHTML = visible.map((value, index) => {
+        const state = value === maxValue ? 'high' : '';
+        const shown = value === null || value === undefined ? '--' : Number(value).toFixed(2);
+        return `<div class="cell ${state}"><small>C${index + 1}</small><strong>${shown} mOhm</strong></div>`;
+      }).join('');
+    }
+
+    function renderResistanceRunState(status) {
+      const badge = el('resistanceStatus');
+      if (!badge) {
+        return;
+      }
+      if (status.resistance_measurement_running) {
+        badge.className = 'badge ok';
+        badge.textContent = 'Mérés fut';
+      } else if ((status.cell_resistances_mohm ?? []).length) {
+        badge.className = 'badge';
+        badge.textContent = 'Utolsó eredmény';
+      } else {
+        badge.className = 'badge';
+        badge.textContent = 'Készenlét';
+      }
+    }
+
     function renderWorkflowMirrors(status) {
       const stats = getCellStats(getVisibleCells(status.cell_voltages_mv ?? []));
       text('dischargePack', fmt(status.pack_voltage_v, 1));
@@ -929,45 +1102,115 @@ async def index() -> str:
       }
     };
 
-    function buildReport() {
-      const status = latestStatus ?? {};
-      const lines = [
-        'EV Battery Service jegyzőkönyv',
-        `Dátum: ${new Date().toLocaleString()}`,
-        `Akkumulátor azonosító: ${el('reportBatteryId').value}`,
-        `Ügyfél / jármű: ${el('reportVehicle').value}`,
-        `Technikus: ${el('reportTechnician').value}`,
-        `Mérés típusa: ${el('reportMode').value}`,
-        '',
-        'Összegzés',
-        `CAN kapcsolat: ${status.connected ? 'aktív' : 'nincs kapcsolat'}`,
-        `Rendszerállapot: ${systemStates[status.system_state] ?? status.system_state ?? '--'}`,
-        `Pack feszültség: ${fmt(status.pack_voltage_v, 1)} V`,
-        `Áram: ${fmt(status.current_a, 2)} A`,
-        `Teljesítmény: ${fmt(status.power_w, 0)} W`,
-        `Min cella: ${status.min_cell_mv ?? '--'} mV`,
-        `Max cella: ${status.max_cell_mv ?? '--'} mV`,
-        `Cella delta: ${status.cell_delta_mv ?? '--'} mV`,
-        `Fault: ${status.fault_code ?? 'nincs'}`,
-        '',
-        'Cellafeszültségek',
-        ...(status.cell_voltages_mv ?? []).map((value, index) => `C${index + 1}: ${value ?? '--'} mV`)
-      ];
-      latestReport = lines.join('\\n');
-      text('reportPreview', latestReport);
+    async function startResistanceMeasurement() {
+      const loadLevel = Number(el('resistanceLoadLevel').value);
+      if (!confirm('Belső ellenállás mérés indítása a kiválasztott terheléssel?')) {
+        return;
+      }
+      const badge = el('resistanceStatus');
+      badge.className = 'badge';
+      badge.textContent = 'Indítás...';
+      try {
+        const response = await fetch('/api/command', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({command: 'internal_resistance_start', value: loadLevel})
+        });
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.detail ?? response.statusText);
+        }
+        badge.className = 'badge ok';
+        badge.textContent = 'Mérés indítva';
+        text('resistanceLog', `${new Date().toLocaleTimeString()} - terhelési szint: ${loadLevel}`);
+      } catch (error) {
+        badge.className = 'badge bad';
+        badge.textContent = 'Hiba';
+        text('resistanceLog', error.message);
+      }
     }
 
-    function downloadReport() {
-      if (!latestReport) {
-        buildReport();
+    async function createReport() {
+      const payload = {
+        battery_id: el('reportBatteryId').value,
+        customer_name: el('reportVehicle').value,
+        vehicle_type: el('reportVehicle').value,
+        operator_name: el('reportTechnician').value,
+        measurement_type: el('reportMode').value,
+        erp_reference: el('reportErpReference').value,
+        invoice_number: el('reportInvoiceNumber').value,
+        work_order_id: el('reportWorkOrderId').value
+      };
+      const response = await fetch('/api/reports', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        text('reportPreview', error.detail ?? response.statusText);
+        return;
       }
-      const blob = new Blob([latestReport], {type: 'text/plain;charset=utf-8'});
-      const url = URL.createObjectURL(blob);
+      latestReport = await response.json();
+      renderReportPreview(latestReport);
+    }
+
+    function renderReportPreview(report) {
+      const lines = [
+        'EV Battery Service jegyzőkönyv',
+        `Report ID: ${report.report_id}`,
+        `Measurement ID: ${report.measurement_id}`,
+        `Dátum: ${new Date(report.created_at).toLocaleString()}`,
+        `Akkumulátor: ${report.battery.battery_id || '--'}`,
+        `Ügyfél / jármű: ${report.customer_name || report.vehicle_type || '--'}`,
+        `Technikus: ${report.operator_name || '--'}`,
+        `Mérés típusa: ${report.measurement_type}`,
+        `ERP referencia: ${report.erp_reference || '--'}`,
+        `Számlaszám: ${report.invoice_number || '--'}`,
+        `Munkalap: ${report.work_order_id || '--'}`,
+        '',
+        'Összegzés',
+        `Eredmény: ${report.summary.result}`,
+        `Pack feszültség: ${report.summary.pack_voltage_start_v ?? '--'} V`,
+        `Áram: ${report.summary.current_a ?? '--'} A`,
+        `Min cella: ${report.summary.min_cell_v ?? '--'} V`,
+        `Max cella: ${report.summary.max_cell_v ?? '--'} V`,
+        `Cella delta: ${report.summary.delta_cell_v ?? '--'} V`,
+        `Max belső ellenállás: ${report.quick_test.max_cell_resistance_mohm ?? '--'} mOhm`,
+        '',
+        'Tervezett grafikonok',
+        ...(report.charts.planned ?? []).map((chart) => `- ${chart}`),
+        '',
+        'Figyelmeztetések',
+        ...((report.quick_test.warnings ?? []).length ? report.quick_test.warnings : ['nincs']),
+        '',
+        'Faultok',
+        ...((report.quick_test.faults ?? []).length ? report.quick_test.faults : ['nincs'])
+      ];
+      text('reportPreview', lines.join('\\n'));
+    }
+
+    async function downloadReportExport(format) {
+      if (!latestReport) {
+        await createReport();
+      }
+      if (!latestReport) {
+        return;
+      }
+      const url = `/api/reports/${latestReport.measurement_id}/${format}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        const error = await response.json();
+        text('reportPreview', error.detail ?? response.statusText);
+        return;
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = url;
-      link.download = `ev-battery-report-${new Date().toISOString().slice(0, 10)}.txt`;
+      link.href = objectUrl;
+      link.download = `${latestReport.measurement_id}.${format}`;
       link.click();
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(objectUrl);
     }
 
     fetch('/api/status')
@@ -976,6 +1219,12 @@ async def index() -> str:
       .catch((error) => text('commandLog', error.message));
 
     el('cellTargetCount').addEventListener('input', () => {
+      if (latestStatus) {
+        render(latestStatus);
+      }
+    });
+
+    el('resistanceCellCount').addEventListener('input', () => {
       if (latestStatus) {
         render(latestStatus);
       }
@@ -996,9 +1245,12 @@ async def index() -> str:
         current_a: null,
         power_w: null,
         cell_voltages_mv: [],
+        cell_resistances_mohm: [],
+        resistance_measurement_running: false,
         min_cell_mv: null,
         max_cell_mv: null,
         cell_delta_mv: null,
+        max_cell_resistance_mohm: null,
         fault_code: null,
         fault_severity: null,
         measurement_valid: false,

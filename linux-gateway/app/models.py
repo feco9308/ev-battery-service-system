@@ -27,13 +27,21 @@ class GatewayStatus(BaseModel):
     current_a: float | None = None
     power_w: float | None = None
     cell_voltages_mv: list[int | None] = Field(default_factory=list)
+    cell_resistances_mohm: list[float | None] = Field(default_factory=list)
+    resistance_measurement_running: bool = False
     min_cell_mv: int | None = None
     max_cell_mv: int | None = None
     cell_delta_mv: int | None = None
+    max_cell_resistance_mohm: float | None = None
     fault_code: int | None = None
     fault_detail: int | None = None
     fault_source: int | None = None
     fault_severity: int | None = None
+    fault_related_index: int | None = None
+    last_command_id: int | None = None
+    last_command_seq: int | None = None
+    last_command_result: int | None = None
+    last_command_reject_reason: int | None = None
     measurement_valid: bool = False
     last_can_rx_ms: int | None = None
 

@@ -2,6 +2,82 @@
 
 Ez az első fejlesztői verzió `vcan0` virtuális CAN interfésszel tesztelhető.
 
+## Gyors indítás
+
+A repo gyökeréből:
+
+```bash
+./start-dev.sh
+```
+
+Ez létrehozza a virtuális környezetet, felhúzza a `vcan0` interfészt, elindítja
+a CAN szimulátort és a webes gatewayt.
+
+Böngészőből:
+
+```text
+http://127.0.0.1:8000
+```
+
+Példák:
+
+```bash
+./start-dev.sh --cells 18
+./start-dev.sh --cells 48 --port 8001
+./start-dev.sh --no-sim
+```
+
+Leállítás:
+
+```bash
+./stop-dev.sh
+```
+
+Ha a virtuális CAN interfészt is le akarod venni:
+
+```bash
+./stop-dev.sh --remove-vcan
+```
+
+## Next ERP / külső rendszer hívás
+
+Fejlesztés közben a riport API token nélkül is hívható. Élesebb használathoz állíts be
+egy tokent indítás előtt:
+
+```bash
+export GATEWAY_API_TOKEN='valami-hosszu-titkos-token'
+./start-dev.sh
+```
+
+Riport létrehozása számla vagy munkalap mellé:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/reports \
+  -H 'Authorization: Bearer valami-hosszu-titkos-token' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "battery_id": "BAT-001",
+    "operator_name": "ERP",
+    "customer_name": "Teszt ügyfél",
+    "vehicle_type": "Teszt jármű",
+    "measurement_type": "quick_test_internal_resistance",
+    "erp_reference": "NEXT-ERP-12345",
+    "invoice_number": "SZ-2026-0001",
+    "work_order_id": "ML-2026-0001"
+  }'
+```
+
+Exportok:
+
+```bash
+curl -H 'Authorization: Bearer valami-hosszu-titkos-token' \
+  http://127.0.0.1:8000/api/reports/MEAS-.../json
+
+curl -H 'Authorization: Bearer valami-hosszu-titkos-token' \
+  -o report.csv \
+  http://127.0.0.1:8000/api/reports/MEAS-.../csv
+```
+
 ## 1. Virtuális környezet
 
 ```bash
@@ -47,15 +123,15 @@ ilyenkor `503` választ ad.
 
 ```bash
 source linux-gateway/.venv/bin/activate
-python tools/can-simulator/send_status.py --channel vcan0 --cells 120
+python tools/can-simulator/send_status.py --channel vcan0 --cells 48
 ```
 
 A `--cells` paraméterrel állítható, hány cellát szimuláljon. Példák:
 
 ```bash
 python tools/can-simulator/send_status.py --channel vcan0 --cells 18
-python tools/can-simulator/send_status.py --channel vcan0 --cells 54
-python tools/can-simulator/send_status.py --channel vcan0 --cells 120
+python tools/can-simulator/send_status.py --channel vcan0 --cells 36
+python tools/can-simulator/send_status.py --channel vcan0 --cells 48
 ```
 
 ## 5. API teszt
