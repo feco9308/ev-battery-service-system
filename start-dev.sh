@@ -10,6 +10,13 @@ CELLS="48"
 START_SIM="1"
 PORT_SET="0"
 
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
 usage() {
   cat <<EOF
 Usage: ./start-dev.sh [options]

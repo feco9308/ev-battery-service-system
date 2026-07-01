@@ -6,6 +6,14 @@ from fastapi.responses import HTMLResponse, Response
 
 from .can_protocol import CommandId, LoadLevel, MeasurementType, encode_measurement_start_parameter
 from .can_service import CanService
+from .integrations import (
+    BatteryMeasurementPayload,
+    ErpNextClient,
+    ErpNextError,
+    MeasurementStatusUpdate,
+    RepairJob,
+)
+from .integrations.measurement_store import LocalMeasurementStore
 from .models import CommandRequest, GatewayStatus
 from .reporting import ReportStore, build_report_from_status, export_report_csv
 from .reporting.models import MeasurementReport, ReportCreateRequest
@@ -13,6 +21,7 @@ from .reporting.models import MeasurementReport, ReportCreateRequest
 app = FastAPI(title="EV Battery Service Gateway")
 can_service = CanService(channel="vcan0")
 report_store = ReportStore()
+measurement_store = LocalMeasurementStore()
 websockets: set[WebSocket] = set()
 
 
@@ -46,6 +55,57 @@ async def on_shutdown() -> None:
 @app.get("/api/status", response_model=GatewayStatus)
 async def get_status() -> GatewayStatus:
     return can_service.status
+
+
+def erpnext_client() -> ErpNextClient:
+    return ErpNextClient()
+
+
+def erpnext_error_response(exc: ErpNextError) -> HTTPException:
+    detail: dict = {"message": str(exc)}
+    if exc.detail is not None:
+        detail["erpnext_detail"] = exc.detail
+    return HTTPException(status_code=exc.status_code, detail=detail)
+
+
+@app.get("/api/erpnext/health", dependencies=[Depends(require_report_api_token)])
+async def erpnext_health() -> dict:
+    try:
+        checked_doctype = erpnext_client().get_logged_user()
+    except ErpNextError as exc:
+        raise erpnext_error_response(exc) from exc
+    return {"ok": True, "checked_doctype": checked_doctype}
+
+
+@app.get("/api/erpnext/repair-jobs", response_model=list[RepairJob], dependencies=[Depends(require_report_api_token)])
+async def list_erpnext_repair_jobs() -> list[RepairJob]:
+    try:
+        return erpnext_client().list_open_repair_jobs()
+    except ErpNextError as exc:
+        raise erpnext_error_response(exc) from exc
+
+
+@app.get("/api/erpnext/repair-jobs/{job_id}", dependencies=[Depends(require_report_api_token)])
+async def get_erpnext_repair_job(job_id: str) -> dict:
+    try:
+        return erpnext_client().get_repair_job(job_id)
+    except ErpNextError as exc:
+        raise erpnext_error_response(exc) from exc
+
+
+@app.put("/api/erpnext/repair-jobs/{job_id}/measurement-status", dependencies=[Depends(require_report_api_token)])
+async def update_erpnext_measurement_status(job_id: str, update: MeasurementStatusUpdate) -> dict:
+    try:
+        document = erpnext_client().update_measurement_status(job_id, update)
+    except ErpNextError as exc:
+        raise erpnext_error_response(exc) from exc
+    return {"ok": True, "repair_job": job_id, "data": document}
+
+
+@app.post("/api/measurements/local", dependencies=[Depends(require_report_api_token)])
+async def save_measurement_locally(payload: BatteryMeasurementPayload) -> dict:
+    path = measurement_store.save(payload)
+    return {"ok": True, "path": str(path)}
 
 
 @app.get("/api/reports", response_model=list[MeasurementReport], dependencies=[Depends(require_report_api_token)])
@@ -598,6 +658,7 @@ async def index() -> str:
     <nav class="tabbar" aria-label="Gateway funkciók">
       <button class="tab-button active" data-tab="overview" onclick="showTab('overview')">Áttekintés</button>
       <button class="tab-button" data-tab="cells" onclick="showTab('cells')">Cella fesz mérés</button>
+      <button class="tab-button" data-tab="erpnext" onclick="showTab('erpnext')">ERPNext munkalapok</button>
       <button class="tab-button" data-tab="resistance" onclick="showTab('resistance')">Ellenállás mérés</button>
       <button class="tab-button" data-tab="discharge" onclick="showTab('discharge')">Kisütés</button>
       <button class="tab-button" data-tab="cell-charge" onclick="showTab('cell-charge')">Cellánkénti töltés</button>
@@ -700,6 +761,47 @@ async def index() -> str:
               <div class="field"><label>Max delta</label><input id="cellMaxDelta" type="number" step="1" value="20"></div>
             </div>
             <div id="cellsMirror" class="cells" style="margin-top: 14px;"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="tab-erpnext" class="tab-panel">
+      <div class="grid">
+        <section class="span-5">
+          <div class="panel-head">
+            <h2>ERPNext kapcsolat</h2>
+            <span id="erpnextStatus" class="badge">Nincs ellenőrizve</span>
+          </div>
+          <div class="panel-body">
+            <div class="commands">
+              <button onclick="checkErpNextHealth()">Kapcsolat teszt</button>
+              <button class="primary" onclick="loadErpNextJobs()">Munkalapok betöltése</button>
+            </div>
+            <div class="form-grid" style="margin-top: 14px;">
+              <div class="field"><label>Munkalap</label><select id="erpnextJobSelect" onchange="selectErpNextJob()"></select></div>
+              <div class="field"><label>Mérés típusa</label><select id="erpnextMeasurementType"><option value="pre">Javítás előtti</option><option value="post">Javítás utáni</option></select></div>
+            </div>
+            <div class="commands" style="margin-top: 14px;">
+              <button onclick="writeErpNextMeasurementStatus()">Mérés kész visszaírása</button>
+            </div>
+            <div id="erpnextLog" class="log"></div>
+          </div>
+        </section>
+        <section class="span-7">
+          <div class="panel-head">
+            <h2>Kiválasztott munkalap</h2>
+            <span id="erpnextJobStatus" class="badge">Nincs kiválasztva</span>
+          </div>
+          <div class="panel-body">
+            <div class="kv">
+              <div><span>Név</span><strong id="erpnextJobName">--</strong></div>
+              <div><span>Rendszám</span><strong id="erpnextLicensePlate">--</strong></div>
+              <div><span>Jármű</span><strong id="erpnextVehicle">--</strong></div>
+              <div><span>Ügyfél</span><strong id="erpnextCustomer">--</strong></div>
+              <div><span>Javítás előtti mérés</span><strong id="erpnextPreDone">--</strong></div>
+              <div><span>Javítás utáni mérés</span><strong id="erpnextPostDone">--</strong></div>
+            </div>
           </div>
         </section>
       </div>
@@ -908,6 +1010,8 @@ async def index() -> str:
 
     let latestStatus = null;
     let latestReport = null;
+    let erpnextJobs = [];
+    let selectedErpNextJob = null;
 
     const el = (id) => document.getElementById(id);
     const fmt = (value, digits = 1) => value === null || value === undefined ? '--' : Number(value).toFixed(digits);
@@ -917,6 +1021,32 @@ async def index() -> str:
         target.textContent = value;
       }
     };
+
+    async function apiFetch(url, options = {}) {
+      const headers = new Headers(options.headers ?? {});
+      const token = localStorage.getItem('gatewayApiToken');
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${token}`);
+      }
+      let response = await fetch(url, {...options, headers});
+      if (response.status !== 401) {
+        return response;
+      }
+      const newToken = prompt('Gateway API token');
+      if (!newToken) {
+        return response;
+      }
+      localStorage.setItem('gatewayApiToken', newToken);
+      headers.set('Authorization', `Bearer ${newToken}`);
+      return fetch(url, {...options, headers});
+    }
+
+    function apiErrorText(data, fallback) {
+      const detail = data?.detail;
+      const message = detail?.message ?? (typeof detail === 'string' ? detail : fallback);
+      const erpMessage = detail?.erpnext_detail?._error_message;
+      return erpMessage ? `${message}: ${erpMessage}` : message;
+    }
 
     function showTab(name) {
       document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.remove('active'));
@@ -1130,6 +1260,85 @@ async def index() -> str:
       }
     }
 
+    async function checkErpNextHealth() {
+      const badge = el('erpnextStatus');
+      badge.className = 'badge';
+      badge.textContent = 'Ellenőrzés...';
+      const response = await apiFetch('/api/erpnext/health');
+      const data = await response.json();
+      if (!response.ok) {
+        badge.className = 'badge bad';
+        badge.textContent = 'ERP hiba';
+        text('erpnextLog', apiErrorText(data, response.statusText));
+        return;
+      }
+      badge.className = 'badge ok';
+      badge.textContent = 'ERP kapcsolat OK';
+      text('erpnextLog', `Elérhető ERP DocType: ${data.checked_doctype}`);
+    }
+
+    async function loadErpNextJobs() {
+      const response = await apiFetch('/api/erpnext/repair-jobs');
+      const data = await response.json();
+      if (!response.ok) {
+        el('erpnextStatus').className = 'badge bad';
+        text('erpnextLog', apiErrorText(data, response.statusText));
+        return;
+      }
+      erpnextJobs = data;
+      const select = el('erpnextJobSelect');
+      select.innerHTML = erpnextJobs.map((job, index) => {
+        const vehicle = [job.license_plate, job.vehicle_make, job.vehicle_model].filter(Boolean).join(' ');
+        return `<option value="${index}">${job.name} - ${vehicle || job.job_status || 'munkalap'}</option>`;
+      }).join('');
+      text('erpnextLog', `${erpnextJobs.length} nyitott munkalap betöltve`);
+      selectErpNextJob();
+    }
+
+    function selectErpNextJob() {
+      const index = Number(el('erpnextJobSelect').value);
+      selectedErpNextJob = erpnextJobs[index] ?? null;
+      const job = selectedErpNextJob;
+      text('erpnextJobName', job?.name ?? '--');
+      text('erpnextLicensePlate', job?.license_plate ?? '--');
+      text('erpnextVehicle', job ? [job.vehicle_make, job.vehicle_model, job.vehicle_year].filter(Boolean).join(' ') || '--' : '--');
+      text('erpnextCustomer', job?.customer ?? '--');
+      text('erpnextPreDone', job?.pre_measurement_done ? 'kész' : 'nincs');
+      text('erpnextPostDone', job?.post_measurement_done ? 'kész' : 'nincs');
+      text('erpnextJobStatus', job?.job_status ?? 'Nincs kiválasztva');
+      if (job) {
+        el('reportWorkOrderId').value = job.name;
+        el('reportErpReference').value = job.name;
+        el('reportVehicle').value = [job.license_plate, job.vehicle_make, job.vehicle_model].filter(Boolean).join(' ');
+      }
+    }
+
+    async function writeErpNextMeasurementStatus() {
+      if (!selectedErpNextJob) {
+        text('erpnextLog', 'Nincs kiválasztott munkalap.');
+        return;
+      }
+      const measurementType = el('erpnextMeasurementType').value;
+      const measurementId = latestReport?.measurement_id ?? `MEAS-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
+      const response = await apiFetch(`/api/erpnext/repair-jobs/${encodeURIComponent(selectedErpNextJob.name)}/measurement-status`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          measurement_type: measurementType,
+          measurement_id: measurementId,
+          measurement_datetime: new Date().toISOString(),
+          status: 'done'
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        text('erpnextLog', apiErrorText(data, response.statusText));
+        return;
+      }
+      text('erpnextLog', `${selectedErpNextJob.name}: ${measurementType === 'pre' ? 'javítás előtti' : 'javítás utáni'} mérés kész visszaírva`);
+      await loadErpNextJobs();
+    }
+
     async function createReport() {
       const payload = {
         battery_id: el('reportBatteryId').value,
@@ -1141,7 +1350,7 @@ async def index() -> str:
         invoice_number: el('reportInvoiceNumber').value,
         work_order_id: el('reportWorkOrderId').value
       };
-      const response = await fetch('/api/reports', {
+      const response = await apiFetch('/api/reports', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
@@ -1198,7 +1407,7 @@ async def index() -> str:
         return;
       }
       const url = `/api/reports/${latestReport.measurement_id}/${format}`;
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       if (!response.ok) {
         const error = await response.json();
         text('reportPreview', error.detail ?? response.statusText);
