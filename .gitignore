@@ -10,6 +10,7 @@ venv/
 !.env.example
 *.sqlite
 *.db
+linux-gateway/data/
 
 # Build outputs
 build/

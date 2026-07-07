@@ -10,8 +10,9 @@ class LocalMeasurementStore:
 
     def save(self, payload: BatteryMeasurementPayload) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
+        module_part = f"_MOD{payload.module_no:02d}" if payload.module_no is not None and payload.module_no > 0 else ""
         filename = _safe_filename(
-            f"{payload.repair_job}_{payload.measurement_type.upper()}_{payload.api_measurement_id}.json"
+            f"{payload.repair_job}{module_part}_{payload.test_type.upper()}_{payload.measurement_stage.upper()}_{payload.api_measurement_id}.json"
         )
         path = self.root / filename
         path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
